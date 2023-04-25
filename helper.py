@@ -19,7 +19,7 @@ def print_train_time(start: float,
     return total_time
 
 
-def eval_model(model: torch.nn.Module,
+def eval_model(model: torch.nn.Module, #TODO: убрать за ненадобностью
                data_loader: torch.utils.data.DataLoader,
                loss_fn: typing.Callable,
                eval_fn,
@@ -58,21 +58,32 @@ def model_eval_report(
         loss_function: typing.Callable,
         eval_function: typing.Callable,
         device: torch.device,
+        transformer=False,
+        class_names=[]
 ):
-    eval_res = eval_model(
+    # eval_res = eval_model(
+    #     model=model,
+    #     data_loader=test_dataloader,
+    #     loss_fn=loss_function,
+    #     eval_fn=eval_function,
+    #     device=device,
+    #     train_time=0,
+    # )
+    _, _, preds = test_step(
         model=model,
-        data_loader=test_dataloader,
-        loss_fn=loss_function,
-        eval_fn=eval_function,
+        dataloader=test_dataloader,
+        loss_function=loss_function,
+        eval_function=eval_function,
         device=device,
-        train_time=0,
+        transformer=transformer
     )
-    targets = torch.tensor(test_dataset.targets)
+    # TODO: костыль
+    targets = torch.tensor(test_dataset.targets if not transformer else test_dataset.tensors[2])
     targets = targets.to(device)
-    class_names = test_dataset.classes
+    class_names = test_dataset.classes if not transformer else class_names
     confmat = torchmetrics.ConfusionMatrix(num_classes=len(class_names), task='multiclass').to(device)
 
-    confmat_tensor = confmat(preds=eval_res["predicted"],
+    confmat_tensor = confmat(preds=preds,
                              target=targets).to(device)
 
     plot_confusion_matrix(
@@ -81,9 +92,9 @@ def model_eval_report(
         figsize=(7, 5)
     )
 
-    print(eval_res)
+    # print(eval_res)
     print(classification_report(
-        y_pred=eval_res["predicted"].cpu().numpy(),
+        y_pred=preds.cpu().numpy(),
         y_true=targets.cpu().numpy(),
         target_names=class_names
     ))
@@ -101,7 +112,8 @@ def train_step(
         loss_function: typing.Callable,
         optimizer: torch.optim.Optimizer,
         eval_function: typing.Callable,
-        device: torch.device
+        device: torch.device,
+        transformer=False
 ) -> (float, float, TrainStatus, int):
     """
     Train step for model: calc loss, zero_grad, backward, step
@@ -114,25 +126,50 @@ def train_step(
     batch_step_save = 0
     model.train()
 
-    for i, (X_train, y_train) in enumerate(tqdm(dataloader, desc="Train batches")):
-        X_train = X_train.to(device)
-        y_train = y_train.to(device)
+    if transformer:
+        for i, (input_ids, input_mask, labels) in enumerate(tqdm(dataloader, desc="Train batches")):
+            input_ids = input_ids.to(device)
+            input_mask = input_mask.to(device)
+            labels = labels.to(device)
 
-        y_train_pred = model(X_train)
+            model_res = model(input_ids,
+                              token_type_ids=None,
+                              attention_mask=input_mask,
+                              labels=labels)
 
-        if torch.isnan(y_train_pred).any():
-            status = TrainStatus.GradientExplosion
-            batch_step_save = i
-            break
+            if torch.isnan(model_res["logits"]).any():
+                status = TrainStatus.GradientExplosion
+                batch_step_save = i
+                break
 
-        loss = loss_function(y_train_pred, y_train)
-        train_loss += loss
+            # loss = loss_function(y_train_pred, labels)
+            train_loss += model_res['loss']
 
-        train_eval += eval_function(y_train, y_train_pred.argmax(dim=1))
+            train_eval += eval_function(labels, model_res['logits'].argmax(dim=1))
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            model_res['loss'].backward()
+            optimizer.step()
+    else:
+        for i, (X_train, y_train) in enumerate(tqdm(dataloader, desc="Train batches")):
+            X_train = X_train.to(device)
+            y_train = y_train.to(device)
+
+            y_train_pred = model(X_train)
+
+            if torch.isnan(y_train_pred).any():
+                status = TrainStatus.GradientExplosion
+                batch_step_save = i
+                break
+
+            loss = loss_function(y_train_pred, y_train)
+            train_loss += loss
+
+            train_eval += eval_function(y_train, y_train_pred.argmax(dim=1))
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
     train_loss /= len(dataloader)
     train_eval /= len(dataloader)
@@ -150,22 +187,40 @@ def test_step(
         dataloader: torch.utils.data.DataLoader,
         loss_function: typing.Callable,
         eval_function: typing.Callable,
-        device: torch.device
+        device: torch.device,
+        transformer=False
 ) -> (float, float):
     """
     :return: loss, acc
     """
     model.eval()
     test_eval, test_loss = 0, 0
+    y_predicted = []
     with torch.inference_mode():
-        for X_test, y_test in tqdm(dataloader, desc="Test batches"):
-            X_test, y_test = X_test.to(device), y_test.to(device)
-            y_test_pred = model(X_test)
-            test_loss += loss_function(y_test_pred, y_test)
-            test_eval += eval_function(y_test, y_test_pred.argmax(dim=1))
+        if transformer:
+            for i, (input_ids, input_mask, labels) in enumerate(tqdm(dataloader, desc="Train batches")):
+                input_ids = input_ids.to(device)
+                input_mask = input_mask.to(device)
+                labels = labels.to(device)
+
+                y_test_pred = model(input_ids,
+                                    token_type_ids=None,
+                                    attention_mask=input_mask,
+                                    labels=labels)
+                y_predicted.append(y_test_pred['logits'].argmax(dim=1))
+                test_loss += y_test_pred['loss']
+                test_eval += eval_function(labels, y_test_pred['logits'].argmax(dim=1))
+        else:
+            for X_test, y_test in tqdm(dataloader, desc="Test batches"):
+                X_test, y_test = X_test.to(device), y_test.to(device)
+                y_test_pred = model(X_test)
+                y_predicted.append(y_test_pred.argmax(dim=1))
+                test_loss += loss_function(y_test_pred, y_test)
+                test_eval += eval_function(y_test, y_test_pred.argmax(dim=1))
         test_loss /= len(dataloader)
         test_eval /= len(dataloader)
-    return test_loss, test_eval
+        y_predicted = torch.cat(y_predicted, dim=0)
+    return test_loss, test_eval, y_predicted
 
 
 def get_name_of_obj_or_fn(fn_or_obj) -> typing.AnyStr:
@@ -186,7 +241,8 @@ def model_trainer(
         optimizer: torch.optim.Optimizer,
         eval_function: typing.Callable,
         device: torch.device,
-        scheduler: torch.optim.lr_scheduler.LRScheduler = None
+        scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+        transformer=False
 ) -> typing.Mapping[typing.AnyStr, float or typing.AnyStr or typing.Collection]:
     """
     Helper function to prevent writing each.
@@ -212,7 +268,8 @@ def model_trainer(
             loss_function=loss_function,
             optimizer=optimizer,
             eval_function=eval_function,
-            device=device
+            device=device,
+            transformer=transformer
         )
 
         history_train_loss.append(round(train_loss.item(), 5))
@@ -224,12 +281,13 @@ def model_trainer(
 
         print(f"---Train--- \n{get_name_of_obj_or_fn(eval_function)}: {train_eval * 100}\nLoss: {train_loss}\n")
 
-        test_loss, test_eval = test_step(
+        test_loss, test_eval, _ = test_step(
             model=model,
             dataloader=test_dataloader,
             loss_function=loss_function,
             eval_function=eval_function,
-            device=device
+            device=device,
+            transformer=transformer
         )
 
         history_test_loss.append(round(test_loss.item(), 5))
