@@ -1,5 +1,9 @@
+import os
 import random
 import typing
+from pathlib import Path
+
+import pandas as pd
 import torch
 from timeit import default_timer as timer
 
@@ -7,6 +11,7 @@ import torchmetrics
 from matplotlib import pyplot as plt
 from mlxtend.plotting import plot_confusion_matrix
 from sklearn.metrics import classification_report
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 from tqdm.notebook import tqdm
 from enum import Enum
 
@@ -19,8 +24,8 @@ def print_train_time(start: float,
     return total_time
 
 
-def eval_model(model: torch.nn.Module, #TODO: убрать за ненадобностью
-               data_loader: torch.utils.data.DataLoader,
+def eval_model(model: torch.nn.Module,  # TODO: убрать за ненадобностью
+               data_loader: DataLoader,
                loss_fn: typing.Callable,
                eval_fn,
                device: torch.device,
@@ -53,8 +58,8 @@ def eval_model(model: torch.nn.Module, #TODO: убрать за ненадобн
 
 def model_eval_report(
         model: torch.nn.Module,
-        test_dataloader: torch.utils.data.DataLoader,
-        test_dataset: torch.utils.data.Dataset,
+        test_dataloader: DataLoader,
+        test_dataset: Dataset,
         loss_function: typing.Callable,
         eval_function: typing.Callable,
         device: torch.device,
@@ -108,7 +113,7 @@ class TrainStatus(Enum):
 
 def train_step(
         model: torch.nn.Module,
-        dataloader: torch.utils.data.DataLoader,
+        dataloader: DataLoader,
         loss_function: typing.Callable,
         optimizer: torch.optim.Optimizer,
         eval_function: typing.Callable,
@@ -184,7 +189,7 @@ def train_step(
 
 def test_step(
         model: torch.nn.Module,
-        dataloader: torch.utils.data.DataLoader,
+        dataloader: DataLoader,
         loss_function: typing.Callable,
         eval_function: typing.Callable,
         device: torch.device,
@@ -235,8 +240,8 @@ def get_name_of_obj_or_fn(fn_or_obj) -> typing.AnyStr:
 def model_trainer(
         model: torch.nn.Module,
         epochs: int,
-        train_dataloader: torch.utils.data.DataLoader,
-        test_dataloader: torch.utils.data.DataLoader,
+        train_dataloader: DataLoader,
+        test_dataloader: DataLoader,
         loss_function: typing.Callable,
         optimizer: torch.optim.Optimizer,
         eval_function: typing.Callable,
@@ -333,6 +338,65 @@ def model_trainer(
     }
 
 
+def model_trainer_with_saving(
+        model: torch.nn.Module,
+        epochs: int,
+        train_dataloader: DataLoader,
+        test_dataloader: DataLoader,
+        loss_function: typing.Callable or None,  # None in case of huggingface transformer
+        optimizer: torch.optim.Optimizer,
+        eval_function: typing.Callable,
+        device: torch.device,
+        file_name: typing.AnyStr,
+
+        scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+        transformer: bool = False,
+        force_override: bool = False,
+        models_folder: typing.AnyStr = 'models',
+        res_folder: typing.AnyStr = 'model_res'
+):
+    MODEL_PATH = Path(models_folder)
+    MODEL_PATH.mkdir(parents=True,
+                     exist_ok=True)
+
+    MODEL_NAME = f"{file_name}.pth"
+    MODEL_SAVE_PATH = MODEL_PATH / MODEL_NAME
+
+    RES_PATH = Path(res_folder)
+    RES_PATH.mkdir(parents=True,
+                   exist_ok=True)
+
+    RES_NAME = f"{file_name}.pickle"
+    RES_SAVE_PATH = RES_PATH / RES_NAME
+
+    results = None
+
+    if os.path.exists(RES_SAVE_PATH) and os.path.exists(MODEL_SAVE_PATH) and not force_override:
+        print("Loading existing model")
+        model.load_state_dict(torch.load(f=MODEL_SAVE_PATH))
+        results = pd.read_pickle(RES_SAVE_PATH)
+    else:
+        print(f"Training and saving \n--Model: {MODEL_SAVE_PATH} \n--Results: {RES_SAVE_PATH}")
+        results = model_trainer(
+            model=model,
+            epochs=epochs,
+            test_dataloader=test_dataloader,
+            train_dataloader=train_dataloader,
+            loss_function=loss_function,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            eval_function=eval_function,
+            device=device,
+            transformer=transformer,
+        )
+        torch.save(obj=model.state_dict(),
+                   f=MODEL_SAVE_PATH)
+        results = pd.DataFrame([results])
+        results.to_pickle(RES_SAVE_PATH)
+
+    return model, results
+
+
 def make_prediction(
         model: torch.nn.Module,
         data: list,
@@ -388,3 +452,38 @@ def plot_random_samples(
         else:
             plt.title(title_wrong_text, fontsize=10, c="r")
         plt.axis(False)
+
+
+def prepare_ds_dl_transformer(
+        train_dataframe: pd.DataFrame,
+        test_dataframe: pd.DataFrame,
+        label_field_name: typing.AnyStr,
+        batch_size: int,
+        num_workers: int
+) -> (Dataset, Dataset, DataLoader, DataLoader):
+    """
+    :return: (Train DS, Test DS, Train DL, Test DL)
+    """
+    train_dataset = TensorDataset(torch.cat(list(train_dataframe["input_ids"].values), dim=0),
+                                  torch.cat(list(train_dataframe["attention_mask"].values), dim=0),
+                                  torch.tensor(train_dataframe[label_field_name].values))
+
+    test_dataset = TensorDataset(torch.cat(list(test_dataframe["input_ids"].values), dim=0),
+                                 torch.cat(list(test_dataframe["attention_mask"].values), dim=0),
+                                 torch.tensor(test_dataframe[label_field_name].values))
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=True
+    )
+
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=True
+    )
+
+    return train_dataset, test_dataset, train_dataloader, test_dataloader
