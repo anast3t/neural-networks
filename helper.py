@@ -60,7 +60,7 @@ def model_eval_report(
         model: torch.nn.Module,
         test_dataloader: DataLoader,
         test_dataset: Dataset,
-        loss_function: typing.Callable,
+        loss_function: typing.Callable or None, # None if transformer
         eval_function: typing.Callable,
         device: torch.device,
         transformer=False,
@@ -237,7 +237,7 @@ def get_name_of_obj_or_fn(fn_or_obj) -> typing.AnyStr:
     return fn_or_obj.__name__ if hasattr(fn_or_obj, '__name__') else fn_or_obj.__class__.__name__
 
 
-def model_trainer(
+def model_trainer(  # TODO: extract history before end of epochs in case of early stop
         model: torch.nn.Module,
         epochs: int,
         train_dataloader: DataLoader,
