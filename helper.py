@@ -147,13 +147,25 @@ def train_step(
                 batch_step_save = i
                 break
 
-            # loss = loss_function(y_train_pred, labels)
-            train_loss += model_res['loss']
+            y_train_pred = model_res['logits']
 
-            train_eval += eval_function(labels, model_res['logits'].argmax(dim=1))
+            loss = None
+            if loss_function is not None:
+                loss = loss_function(y_train_pred, labels)
+            else:
+                loss = model_res['loss']
+
+            train_loss += loss
+
+            train_eval += eval_function(labels, y_train_pred.argmax(dim=1))
 
             optimizer.zero_grad()
-            model_res['loss'].backward()
+
+            if loss_function is not None:
+                loss.backward()
+            else:
+                model_res['loss'].backward()
+
             optimizer.step()
     else:
         for i, (X_train, y_train) in enumerate(tqdm(dataloader, desc="Train batches")):
@@ -247,7 +259,7 @@ def model_trainer(  # TODO: extract history before end of epochs in case of earl
         eval_function: typing.Callable,
         device: torch.device,
         scheduler: torch.optim.lr_scheduler.LRScheduler = None,
-        transformer=False
+        transformer=False,
 ) -> typing.Mapping[typing.AnyStr, float or typing.AnyStr or typing.Collection]:
     """
     Helper function to prevent writing each.
@@ -387,7 +399,7 @@ def model_trainer_with_saving(
             scheduler=scheduler,
             eval_function=eval_function,
             device=device,
-            transformer=transformer,
+            transformer=transformer
         )
         torch.save(obj=model.state_dict(),
                    f=MODEL_SAVE_PATH)
